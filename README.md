@@ -2,7 +2,7 @@
 
 🇫🇷 [Version française](LISEZMOI.md)
 
-🎬 Step-by-step video (in French, English audio track available): *link added at publication*
+🎬 Step-by-step video (in French, English title and description): [This $15 screen shows my game FPS… and my solar battery](https://youtu.be/b4XATOMQBNA)
 
 ![Preview](images/apercu.jpg)
 

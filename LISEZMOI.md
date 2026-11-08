@@ -2,7 +2,7 @@
 
 🇬🇧 [English version](README.md)
 
-🎬 La vidéo tuto pas à pas : *lien ajouté à la publication*
+🎬 La vidéo tuto pas à pas : [Cet écran à 15 € affiche mes FPS… et ma batterie solaire](https://youtu.be/b4XATOMQBNA)
 
 ![Aperçu](images/apercu.jpg)
 
