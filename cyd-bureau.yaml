@@ -1,0 +1,457 @@
+# =====================================================================
+#  Écran de bureau CYD (ESP32-2432S028) : PC + maison + horloge
+#  Touche l'écran pour passer à la page suivante.
+#  03/11/2026 : luminosité de nuit 15 % -> 45 % (écran presque noir)
+#               réseau = « Réseau total (avec voiture) »
+#               batterie (% et W) = JK-BMS, comme le dashboard
+#  06/11/2026 : message « coup de main » seulement si les panneaux produisent
+#               (sinon « La batterie prend le relais » / « Le soleil se fait attendre »)
+#               FPS : « -- » sous 5 FPS (HWiNFO affichait 1 FPS hors jeu)
+# =====================================================================
+
+substitutions:
+  name: cyd-bureau
+  friendly_name: "Écran bureau"
+
+  # --- Luminosité ------------------------------------------------------
+  lum_jour: "100%"     # de 7h00 à 23h00
+  lum_nuit: "45%"      # de 23h00 à 7h00 (15 % était trop sombre)
+
+  # --- ID des capteurs dans Home Assistant ----------------------------
+  # Vérifie-les dans HA > Paramètres > Appareils et services > Entités
+  # et remplace si besoin (seulement la partie après les deux-points).
+  ent_cpu: sensor.mon_pc_pc_cpu               # HASS.Agent : charge CPU (%)
+  ent_ram: sensor.mon_pc_pc_ram               # HASS.Agent : mémoire utilisée (%)
+  ent_gpu: sensor.mon_pc_pc_gpu               # HASS.Agent : charge GPU (%)
+  ent_gpu_temp: sensor.mon_pc_pc_gpu_temp     # HASS.Agent (PowerShell via HWiNFO) : température GPU (°C)
+  ent_fps: sensor.mon_pc_pc_fps               # HASS.Agent (PowerShell via HWiNFO) : images par seconde du jeu
+  # Onduleur Deye : nouvel ESP32 en direct (mise à jour toutes les 2 s)
+  ent_pv: sensor.onduleur_deye_pv_total_puissance        # production solaire DI (W)
+  ent_batt_soc: sensor.batteries_soc_moyen                # batteries maison, moyenne des 2 JK-BMS (%)
+  ent_batt_power: sensor.batteries_puissance_totale       # batteries maison, somme des 2 JK-BMS (W, + charge / - décharge)
+  ent_load: sensor.consommation_maison_reelle             # vraie conso maison, micro-onduleurs compris (W)
+  ent_mg_soc: sensor.ma_voiture_batterie   # batterie de la MG (%)
+  ent_ev_power: sensor.ma_borne_puissance_de_charge   # puissance de charge Trydan (W)
+  ent_grid: sensor.reseau_total_avec_voiture             # réseau maison + voiture (W, + achat / - vente)
+  ent_pv_poule: sensor.pv_garage_poule_local_puissance   # micro-onduleur PV Garage Poule (W)
+  ent_pv_loc: sensor.pv_location_local_puissance         # micro-onduleur PV Location (W)
+  ent_ev_connecte: binary_sensor.ma_borne_connecte
+  ent_ev_pause: switch.ma_borne_mettre_la_session_en_pause
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  on_boot:
+    priority: -100
+    then:
+      # Au démarrage, applique la bonne luminosité selon l'heure
+      - wait_until:
+          condition:
+            lambda: 'return id(ha_time).now().is_valid();'
+          timeout: 30s
+      - lambda: |-
+          auto now = id(ha_time).now();
+          bool nuit = now.is_valid() && (now.hour >= 23 || now.hour < 7);
+          auto call = id(backlight).turn_on();
+          call.set_brightness(nuit ? atof("${lum_nuit}") / 100.0f : atof("${lum_jour}") / 100.0f);
+          call.perform();
+
+esp32:
+  board: esp32dev
+
+logger:
+
+api:
+  encryption:
+    key: !secret cyd_bureau__encryption_key
+
+ota:
+  - platform: esphome
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "CYD Bureau secours"
+
+captive_portal:
+
+time:
+  - platform: homeassistant
+    id: ha_time
+    timezone: Europe/Paris
+    on_time:
+      # Rétroéclairage réduit la nuit (sans être noir)
+      - hours: 23
+        minutes: 0
+        seconds: 0
+        then:
+          - light.turn_on: { id: backlight, brightness: "${lum_nuit}" }
+      - hours: 7
+        minutes: 0
+        seconds: 0
+        then:
+          - light.turn_on: { id: backlight, brightness: "${lum_jour}" }
+
+# ---------------------------------------------------------------------
+#  Matériel du CYD
+# ---------------------------------------------------------------------
+spi:
+  - id: spi_tft
+    clk_pin: GPIO14
+    mosi_pin: GPIO13
+    miso_pin: GPIO12
+  - id: spi_touch
+    clk_pin: GPIO25
+    mosi_pin: GPIO32
+    miso_pin: GPIO39
+
+output:
+  - platform: ledc
+    pin: GPIO21            # si l'écran reste noir, essaie GPIO27
+    id: backlight_pwm
+
+light:
+  - platform: monochromatic
+    output: backlight_pwm
+    name: "Rétroéclairage"
+    id: backlight
+    restore_mode: ALWAYS_ON
+
+touchscreen:
+  - platform: xpt2046
+    id: touch
+    spi_id: spi_touch
+    cs_pin: GPIO33
+    interrupt_pin: GPIO36
+    update_interval: 50ms
+    threshold: 400
+    calibration:
+      x_min: 280
+      x_max: 3860
+      y_min: 340
+      y_max: 3860
+    on_release:
+      - display.page.show_next: ecran
+      - component.update: ecran
+
+# ---------------------------------------------------------------------
+#  Données venant de Home Assistant
+# ---------------------------------------------------------------------
+sensor:
+  - { platform: homeassistant, id: pc_cpu, entity_id: "${ent_cpu}" }
+  - { platform: homeassistant, id: pc_ram, entity_id: "${ent_ram}" }
+  - { platform: homeassistant, id: pc_gpu, entity_id: "${ent_gpu}" }
+  - { platform: homeassistant, id: pc_gpu_temp, entity_id: "${ent_gpu_temp}" }
+  - { platform: homeassistant, id: pc_fps, entity_id: "${ent_fps}" }
+  - { platform: homeassistant, id: pv, entity_id: "${ent_pv}" }
+  - { platform: homeassistant, id: batt_soc, entity_id: "${ent_batt_soc}" }
+  # JK-BMS : + charge / - décharge -> on inverse pour l'écran (+ décharge / - charge)
+  - platform: homeassistant
+    id: batt_power
+    entity_id: "${ent_batt_power}"
+    filters:
+      - multiply: -1
+  - { platform: homeassistant, id: load, entity_id: "${ent_load}" }
+  - { platform: homeassistant, id: mg_soc, entity_id: "${ent_mg_soc}" }
+  - { platform: homeassistant, id: ev_power, entity_id: "${ent_ev_power}" }
+  - { platform: homeassistant, id: grid_power, entity_id: "${ent_grid}" }
+  - { platform: homeassistant, id: pv_poule, entity_id: "${ent_pv_poule}" }
+  - { platform: homeassistant, id: pv_loc, entity_id: "${ent_pv_loc}" }
+
+binary_sensor:
+  - { platform: homeassistant, id: ev_connecte, entity_id: "${ent_ev_connecte}" }
+  - { platform: homeassistant, id: ev_pause, entity_id: "${ent_ev_pause}" }
+
+text_sensor:
+  - { platform: homeassistant, id: soleil, entity_id: sun.sun }
+
+# ---------------------------------------------------------------------
+#  Polices et couleurs
+# ---------------------------------------------------------------------
+font:
+  - file: "gfonts://Roboto"
+    id: f_small
+    size: 15
+    glyphs: " !#%&()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[]_abcdefghijklmnopqrstuvwxyz°éèêàçûôùÉ"
+  - file: "gfonts://Roboto@700"
+    id: f_med
+    size: 22
+    glyphs: " !#%&()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[]_abcdefghijklmnopqrstuvwxyz°éèêàçûôùÉ"
+  - file: "gfonts://Roboto@700"
+    id: f_val
+    size: 17
+    glyphs: " !#%&()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[]_abcdefghijklmnopqrstuvwxyz°éèêàçûôùÉ"
+  - file: "gfonts://Roboto@700"
+    id: f_big
+    size: 40
+    glyphs: " %,.-0123456789:kWh"
+  - file: "gfonts://Roboto@300"
+    id: f_clock
+    size: 84
+    glyphs: "0123456789:"
+
+color:
+  - { id: c_bg, hex: "0B1220" }
+  - { id: c_track, hex: "334466" }   # gris-bleu (rend mieux en palette 8 bits)
+  - { id: c_txt, hex: "F1F5F9" }
+  - { id: c_dim, hex: "8A99AD" }
+  - { id: c_blue, hex: "38BDF8" }
+  - { id: c_green, hex: "4ADE80" }
+  - { id: c_yellow, hex: "FACC15" }
+  - { id: c_orange, hex: "FB923C" }
+  - { id: c_red, hex: "F87171" }
+  - { id: c_pink, hex: "F472B6" }
+  - { id: c_purple, hex: "C084FC" }
+  - { id: c_cyan, hex: "22D3EE" }
+  - { id: c_moon, hex: "E2E8F0" }
+  - { id: c_box, hex: "1E293B" }
+
+# ---------------------------------------------------------------------
+#  Écran : 3 pages
+# ---------------------------------------------------------------------
+display:
+  - platform: ili9xxx
+    id: ecran
+    model: ILI9341
+    spi_id: spi_tft
+    cs_pin: GPIO15
+    dc_pin: GPIO2
+    invert_colors: false
+    color_order: rgb       # dalle TPM408 : rouge et bleu inversés avec la valeur par défaut
+    color_palette: 8BIT
+    update_interval: 400ms   # rapide pour l'animation des flux d'énergie
+    # Dalle TPM408 : réglage paysage 320x240
+    #   - tête en bas -> mirror_x: true et mirror_y: true
+    #   - en miroir   -> change seulement mirror_x
+    dimensions:
+      width: 320
+      height: 240
+    transform:
+      swap_xy: false
+      mirror_x: false
+      mirror_y: true
+    pages:
+      # ---------------- Page 1 : le PC ----------------
+      - id: page_pc
+        lambda: |-
+          it.fill(id(c_bg));
+          it.print(12, 8, id(f_med), id(c_txt), "Mon PC");
+          if (id(ha_time).now().is_valid())
+            it.strftime(308, 8, id(f_med), id(c_dim), TextAlign::TOP_RIGHT, "%H:%M", id(ha_time).now());
+
+          if (std::isnan(id(pc_cpu).state)) {
+            it.print(160, 130, id(f_med), id(c_dim), TextAlign::CENTER, "PC éteint");
+            return;
+          }
+
+          // 5 barres : libellé + valeur exacte à droite, barre en dessous
+          auto bar = [&](int y, const char *label, float val, float vmax, const char *fmt, Color col, bool vide) {
+            it.print(12, y, id(f_small), id(c_dim), label);
+            if (vide || std::isnan(val)) {
+              it.print(308, y, id(f_small), id(c_dim), TextAlign::TOP_RIGHT, "--");
+              val = 0;
+            } else {
+              it.printf(308, y, id(f_small), id(c_txt), TextAlign::TOP_RIGHT, fmt, val);
+            }
+            float r = val / vmax;
+            if (r < 0) r = 0;
+            if (r > 1) r = 1;
+            it.filled_rectangle(12, y + 18, 296, 11, id(c_track));
+            it.filled_rectangle(12, y + 18, (int) (296 * r), 11, col);
+          };
+
+          float cpu = id(pc_cpu).state;
+          float ram = id(pc_ram).state;
+          float gpu = id(pc_gpu).state;
+          float tg = id(pc_gpu_temp).state;
+          float fps = id(pc_fps).state;
+          bool pas_de_jeu = std::isnan(fps) || fps < 5;   // HWiNFO renvoie ~1 FPS sur le bureau : « -- » sous 5 FPS
+          bar(36, "Processeur", cpu, 100, "%.0f %%", cpu > 85 ? id(c_red) : id(c_blue), false);
+          bar(76, "Mémoire", ram, 100, "%.0f %%", ram > 85 ? id(c_red) : id(c_green), false);
+          bar(116, "Carte graphique", gpu, 100, "%.0f %%", gpu > 85 ? id(c_red) : id(c_orange), false);
+          bar(156, "Température GPU", tg, 95, "%.0f °C", tg > 80 ? id(c_red) : id(c_yellow), std::isnan(tg) || tg < 1);
+          // FPS : vert >= 60, orange 30-59, rouge < 30 ; « -- » quand aucun jeu ne tourne
+          Color cf = fps >= 60 ? id(c_green) : (fps >= 30 ? id(c_orange) : id(c_red));
+          bar(196, "Jeu (FPS)", fps, 165, "%.0f FPS", cf, pas_de_jeu);
+
+      # ---------------- Page 2 : la maison (flux animés) ----------------
+      - id: page_maison
+        lambda: |-
+          static uint32_t f = 0;
+          f++;
+          it.fill(id(c_bg));
+          it.print(12, 4, id(f_med), id(c_txt), "Maison");
+          auto now = id(ha_time).now();
+          if (now.is_valid())
+            it.strftime(308, 4, id(f_med), id(c_dim), TextAlign::TOP_RIGHT, "%H:%M", now);
+
+          auto nz = [](float v) { return std::isnan(v) ? 0.0f : v; };
+          auto val = [](float w, char *buf, size_t n) {
+            if (std::isnan(w)) { snprintf(buf, n, "--"); return; }
+            w = fabsf(w);
+            if (w >= 1000) snprintf(buf, n, "%.1f kW", w / 1000.0f);
+            else snprintf(buf, n, "%.0f W", w);
+          };
+
+          float pv_deye = nz(id(pv).state);
+          float pv_tot = pv_deye + nz(id(pv_poule).state) + nz(id(pv_loc).state);
+          float bat = nz(id(batt_power).state);    // + décharge / - charge
+          float grid = nz(id(grid_power).state);   // + achat / - vente (voiture comprise)
+          float conso = id(load).state;
+          float ev = nz(id(ev_power).state);
+          float soc = id(batt_soc).state;
+          float mg = id(mg_soc).state;
+          bool jour = id(soleil).has_state() ? (id(soleil).state == "above_horizon") : (pv_tot > 50);
+          char b[32];
+
+          // ----- Petit message façon dashboard -----
+          const char *msg;
+          if (ev > 100) msg = "La MG fait le plein";
+          else if (grid > 1500) msg = "On puise sur le réseau";
+          else if (!jour) msg = (bat > 50) ? "Bonne nuit, la batterie veille" : "Bonne nuit";
+          else if (!std::isnan(soc) && soc >= 99) msg = "Batteries pleines !";
+          else if (pv_tot < 50) msg = (bat > 50) ? "La batterie prend le relais" : "Le soleil se fait attendre";
+          else if (pv_tot > nz(conso) && grid < 50) msg = "Le soleil fait tout !";
+          else msg = "Le soleil donne un coup de main";
+          it.print(160, 30, id(f_small), id(c_dim), TextAlign::TOP_CENTER, msg);
+
+          // ----- Flux animés (les points avancent dans le sens de l'énergie) -----
+          auto flux = [&](int x1, int y1, int x2, int y2, float p, Color col) {
+            it.line(x1, y1, x2, y2, id(c_track));
+            float a = fabsf(p);
+            if (a < 30) return;
+            float v = a < 500 ? 0.06f : (a < 2000 ? 0.10f : 0.16f);
+            for (int k = 0; k < 3; k++) {
+              float t = fmodf(f * v + k / 3.0f, 1.0f);
+              if (p < 0) t = 1.0f - t;
+              it.filled_circle(x1 + (int) ((x2 - x1) * t), y1 + (int) ((y2 - y1) * t), 3, col);
+            }
+          };
+          flux(160, 86, 160, 108, pv_deye, id(c_yellow));                       // soleil -> onduleur
+          flux(58, 122, 140, 122, bat, bat > 0 ? id(c_pink) : id(c_green));     // batterie <-> onduleur
+          flux(278, 122, 180, 122, grid, id(c_blue));                           // réseau <-> onduleur
+          flux(150, 138, 104, 180, nz(conso), id(c_purple));                     // onduleur -> maison
+          flux(170, 138, 226, 190, ev, id(c_cyan));                             // onduleur -> voiture
+
+          // ----- Soleil ou lune -----
+          int sx = 160, sy = 70;
+          if (jour) {
+            float a0 = f * 0.2f;
+            for (int k = 0; k < 8; k++) {
+              float a = a0 + k * 0.785f;
+              it.line((int) (sx + cosf(a) * 16), (int) (sy + sinf(a) * 16),
+                      (int) (sx + cosf(a) * 22), (int) (sy + sinf(a) * 22), id(c_yellow));
+            }
+            it.filled_circle(sx, sy, 12, id(c_yellow));
+          } else {
+            it.filled_circle(sx, sy, 12, id(c_moon));
+            it.filled_circle(sx + 6, sy - 4, 11, id(c_bg));
+            static const int st[6][2] = {{112, 52}, {206, 48}, {126, 90}, {232, 84}, {96, 72}, {120, 62}};
+            for (int k = 0; k < 6; k++)
+              if ((f / 2 + k) % 3 != 0) it.filled_rectangle(st[k][0], st[k][1], 2, 2, id(c_txt));
+          }
+          val(pv_tot, b, sizeof(b));
+          it.print(sx + 28, sy - 9, id(f_val), jour ? id(c_yellow) : id(c_dim), b);
+
+          // ----- Onduleur -----
+          it.filled_rectangle(140, 108, 40, 30, id(c_box));
+          it.rectangle(140, 108, 40, 30, id(c_blue));
+          it.filled_triangle(162, 112, 152, 125, 161, 125, id(c_yellow));
+          it.filled_triangle(158, 121, 168, 121, 156, 135, id(c_yellow));
+
+          // ----- Batteries maison -----
+          int bx = 14, by = 96, bw = 42, bh = 50;
+          it.filled_rectangle(bx + 15, by - 4, 12, 4, id(c_dim));
+          it.rectangle(bx, by, bw, bh, id(c_txt));
+          if (!std::isnan(soc)) {
+            Color cs = soc < 20 ? id(c_red) : (soc < 50 ? id(c_orange) : id(c_green));
+            int hf = (int) ((bh - 4) * std::min(std::max(soc, 0.0f), 100.0f) / 100.0f);
+            it.filled_rectangle(bx + 2, by + bh - 2 - hf, bw - 4, hf, cs);
+            it.printf(bx + bw / 2, by + bh / 2, id(f_small), id(c_txt), TextAlign::CENTER, "%.0f%%", soc);
+          }
+          val(bat, b, sizeof(b));
+          it.print(bx + bw / 2, by + bh + 4, id(f_small),
+                   bat > 30 ? id(c_pink) : (bat < -30 ? id(c_green) : id(c_dim)), TextAlign::TOP_CENTER, b);
+
+          // ----- Pylône réseau -----
+          int gx = 292, gy = 96;
+          Color cg = grid > 30 ? id(c_blue) : (grid < -30 ? id(c_green) : id(c_dim));
+          it.line(gx, gy, gx - 12, gy + 50, cg);
+          it.line(gx, gy, gx + 12, gy + 50, cg);
+          it.line(gx - 14, gy + 12, gx + 14, gy + 12, cg);
+          it.line(gx - 10, gy + 24, gx + 10, gy + 24, cg);
+          it.line(gx - 9, gy + 12, gx + 7, gy + 24, cg);
+          it.line(gx + 9, gy + 12, gx - 7, gy + 24, cg);
+          if (grid > 30) it.print(gx, gy - 18, id(f_small), cg, TextAlign::TOP_CENTER, "achat");
+          else if (grid < -30) it.print(gx, gy - 18, id(f_small), cg, TextAlign::TOP_CENTER, "vente");
+          val(grid, b, sizeof(b));
+          it.print(gx - 6, gy + 54, id(f_small), cg, TextAlign::TOP_CENTER, b);
+
+          // ----- Maison (fenêtres allumées le soir) -----
+          int hx = 96, hy = 198;
+          it.filled_triangle(hx - 22, hy, hx, hy - 18, hx + 22, hy, id(c_purple));
+          it.filled_rectangle(hx - 16, hy, 32, 22, id(c_purple));
+          Color cw = jour ? id(c_bg) : id(c_yellow);
+          it.filled_rectangle(hx - 12, hy + 5, 7, 6, cw);
+          it.filled_rectangle(hx + 5, hy + 5, 7, 6, cw);
+          it.filled_rectangle(hx - 3, hy + 11, 6, 11, id(c_bg));
+          val(conso, b, sizeof(b));
+          it.print(hx + 28, hy + 2, id(f_val), id(c_txt), b);
+
+          // ----- Voiture MG -----
+          int cx = 238, cy = 200;
+          Color cc = ev > 100 ? id(c_cyan) : id(c_blue);
+          it.filled_rectangle(cx - 26, cy, 52, 12, cc);
+          it.filled_rectangle(cx - 15, cy - 9, 30, 10, cc);
+          it.filled_rectangle(cx - 12, cy - 6, 11, 6, id(c_bg));
+          it.filled_rectangle(cx + 1, cy - 6, 11, 6, id(c_bg));
+          it.filled_circle(cx - 15, cy + 13, 5, id(c_txt));
+          it.filled_circle(cx + 15, cy + 13, 5, id(c_txt));
+          if (ev > 100 && (f % 4) < 2)   // éclair qui clignote pendant la charge
+            it.filled_triangle(cx + 30, cy - 12, cx + 24, cy - 2, cx + 30, cy - 2, id(c_yellow));
+
+          char ct[40];
+          char pm[8];
+          if (std::isnan(mg)) snprintf(pm, sizeof(pm), "--");
+          else snprintf(pm, sizeof(pm), "%.0f%%", mg);
+          bool branchee = id(ev_connecte).state;
+          int h = now.is_valid() ? now.hour : 12;
+          int mn = now.is_valid() ? now.minute : 0;
+          bool attente_soir = (h * 60 + mn >= 6 * 60 + 10) && (h < 21);
+          if (ev > 100) {
+            val(ev, b, sizeof(b));
+            snprintf(ct, sizeof(ct), "%s - charge %s", pm, b);
+          } else if (branchee && !std::isnan(mg) && mg >= 80) {
+            snprintf(ct, sizeof(ct), "%s - objectif atteint", pm);
+          } else if (branchee && id(ev_pause).state) {
+            snprintf(ct, sizeof(ct), attente_soir ? "%s - attend 21h00" : "%s - en pause", pm);
+          } else if (branchee) {
+            snprintf(ct, sizeof(ct), "%s - branchée", pm);
+          } else {
+            snprintf(ct, sizeof(ct), "%s", pm);
+          }
+          it.print(cx - 6, 223, id(f_small), ev > 100 ? id(c_cyan) : id(c_dim), TextAlign::TOP_CENTER, ct);
+
+      # ---------------- Page 3 : horloge ----------------
+      - id: page_horloge
+        lambda: |-
+          it.fill(id(c_bg));
+          auto now = id(ha_time).now();
+          if (!now.is_valid()) {
+            it.print(160, 120, id(f_med), id(c_dim), TextAlign::CENTER, "Synchro...");
+            return;
+          }
+          static const char *jours[] = {"Dimanche", "Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi"};
+          static const char *mois[] = {"janvier", "février", "mars", "avril", "mai", "juin", "juillet",
+                                       "août", "septembre", "octobre", "novembre", "décembre"};
+          it.strftime(160, 100, id(f_clock), id(c_txt), TextAlign::CENTER, "%H:%M", now);
+          it.printf(160, 170, id(f_med), id(c_dim), TextAlign::CENTER, "%s %d %s",
+                    jours[now.day_of_week - 1], now.day_of_month, mois[now.month - 1]);
+          // Même total que la page Maison : Deye + PV Garage Poule + PV Location
+          auto nz0 = [](float v) { return std::isnan(v) ? 0.0f : v; };
+          float pvw = nz0(id(pv).state) + nz0(id(pv_poule).state) + nz0(id(pv_loc).state);
+          if (pvw > 50) {
+            it.filled_circle(130, 214, 7, id(c_yellow));
+            it.printf(146, 205, id(f_small), id(c_yellow), TextAlign::TOP_LEFT, "%.1f kW", pvw / 1000.0);
+          }

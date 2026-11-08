@@ -1,0 +1,41 @@
+=====================================================================
+ Les 5 capteurs HASS.Agent pour le petit écran (carte graphique NVIDIA)
+ HASS.Agent > Capteurs > Ajouter nouveau
+=====================================================================
+
+1) Processeur
+   Type : Charge CPU                  Nom : pc_cpu        Mise à jour : 5 s
+
+2) Mémoire
+   Type : Utilisation de la mémoire   Nom : pc_ram        Mise à jour : 5 s
+
+3) Température de la carte graphique
+   Type : Capteur PowerShell          Nom : pc_gpu_temp   Mise à jour : 5 s
+   Commande :
+nvidia-smi --query-gpu=temperature.gpu --format=csv,noheader,nounits
+
+4) Charge de la carte graphique
+   Type : Capteur PowerShell          Nom : pc_gpu        Mise à jour : 5 s
+   Commande :
+nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits
+
+5) Images par seconde du jeu (il faut HWiNFO ouvert, voir plus bas)
+   Type : Capteur PowerShell          Nom : pc_fps        Mise à jour : 2 s
+   Commande (une seule ligne) :
+$p=Get-ItemProperty 'HKCU:\Software\HWiNFO64\VSB' -EA 0;$v=0;if($p){for($i=0;$i -lt 200;$i++){$l=$p.('Label'+$i);if($l -eq $null){break};if($l -like '*Presented (avg)*'){$v=[double]($p.('ValueRaw'+$i) -replace ',','.');break}}};[math]::Round($v)
+
+Pour chaque capteur PowerShell : « Tester la commande » doit afficher un nombre.
+À la fin : « Enregistrer et activer les capteurs ».
+
+---------------------------------------------------------------------
+ Réglage HWiNFO (obligatoire pour les FPS)
+---------------------------------------------------------------------
+- Au lancement : « Capteurs seulement » (Sensors-only)
+- Paramètres > onglet « HWiNFO Gadget » :
+    cocher « Activer la création de rapports vers Gadget »
+    cliquer sur « Fréquence d'images Presented (avg) »
+    cocher « Valeur du rapport dans Gadget » (la colonne passe à « Oui »)
+- Réglages principaux : cocher « Démarrage automatique »
+  (sinon les FPS affichent « -- » après un redémarrage du PC)
+
+Les commandes nvidia-smi fonctionnent avec une carte NVIDIA.
